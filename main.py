@@ -14,22 +14,35 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import GPT4All
 
 
-# ---------------------------------------------------------
-# 1. BASIC PATHS – CHANGE THESE IF NEEDED
-# ---------------------------------------------------------
+# =========================================================
+# 1. PATHS & CONFIG
+# =========================================================
 
 DATA_PATH = "data/survey.csv"
 DOCS_GLOB = "docs/*.txt"
 
-# Path to your local GPT4All model (.gguf)
-# Example for Windows:
-# MODEL_PATH = r"C:\Users\YourName\AppData\Local\nomic.ai\GPT4All\deepseek-r1-distill-qwen-7b.Q4_0.gguf"
-MODEL_PATH = "models/deepseek-r1-distill-qwen-7b.Q4_0.gguf"
+# You have TWO options for your local model path:
+# 1) Set an environment variable INSIGHTRAG_MODEL_PATH
+#    Example (PowerShell):
+#      $env:INSIGHTRAG_MODEL_PATH = "C:\\Users\\YOU\\AppData\\Local\\nomic.ai\\GPT4All\\your-model.gguf"
+# 2) Or edit DEFAULT_MODEL_PATH below to your actual absolute path.
+
+DEFAULT_MODEL_PATH = r"C:\path\to\your\local\model.gguf"  # <- change or override via ENV
 
 
-# ---------------------------------------------------------
+def get_model_path() -> str:
+    env_path = os.getenv("INSIGHTRAG_MODEL_PATH")
+    if env_path:
+        return env_path
+    return DEFAULT_MODEL_PATH
+
+
+MODEL_PATH = get_model_path()
+
+
+# =========================================================
 # 2. LOAD SURVEY DATA
-# ---------------------------------------------------------
+# =========================================================
 
 if os.path.exists(DATA_PATH):
     df = pd.read_csv(DATA_PATH)
@@ -39,9 +52,9 @@ else:
     df = pd.DataFrame()
 
 
-# ---------------------------------------------------------
+# =========================================================
 # 3. BUILD RAG INDEX FROM DOCS/
-# ---------------------------------------------------------
+# =========================================================
 
 def load_text_documents(pattern: str) -> List[Document]:
     docs = []
@@ -67,7 +80,7 @@ def build_vectorstore() -> FAISS:
     )
     split_docs = splitter.split_documents(raw_docs)
 
-    # Local, free embedding model (downloaded once from HuggingFace)
+    # Free local embedding model (downloaded once)
     embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     vectorstore = FAISS.from_documents(split_docs, embeddings)
     return vectorstore
@@ -77,9 +90,9 @@ vectorstore = build_vectorstore()
 retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
 
-# ---------------------------------------------------------
+# =========================================================
 # 4. TOOL FUNCTIONS (RAG + STATS)
-# ---------------------------------------------------------
+# =========================================================
 
 def rag_search(query: str) -> str:
     """
@@ -193,20 +206,20 @@ def run_ttest(params: str) -> str:
     """)
 
 
-# ---------------------------------------------------------
+# =========================================================
 # 5. LOCAL LLM (GPT4ALL) + AGENT SETUP
-# ---------------------------------------------------------
+# =========================================================
 
 if not os.path.exists(MODEL_PATH):
-    print(f"[WARNING] Model file not found at {MODEL_PATH}. Please update MODEL_PATH.")
-    print("The program will still start, but the LLM will fail when called.")
+    print(f"[WARNING] Model file not found at:\n  {MODEL_PATH}")
+    print("Set INSIGHTRAG_MODEL_PATH env var or edit DEFAULT_MODEL_PATH in main.py.")
+    # We still try to load; GPT4All will raise a clearer error.
 
 llm = GPT4All(
     model=MODEL_PATH,
     verbose=True,
-    n_threads=8,   # adjust to your CPU
+    n_threads=8,   # adjust based on your CPU
 )
-
 
 tools = [
     Tool(
@@ -243,7 +256,6 @@ agent = initialize_agent(
     verbose=True,
 )
 
-
 SYSTEM_INSTRUCTIONS = """
 You are InsightRAG, an autonomous survey analysis assistant.
 
@@ -262,9 +274,9 @@ Always:
 """
 
 
-# ---------------------------------------------------------
+# =========================================================
 # 6. SIMPLE COMMAND-LINE CHAT LOOP
-# ---------------------------------------------------------
+# =========================================================
 
 def chat_with_agent():
     print("=== InsightRAG: Autonomous Survey Analyst (Local LLM) ===")
