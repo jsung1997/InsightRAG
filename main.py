@@ -1,38 +1,46 @@
 import os
 import glob
 import textwrap
+from typing import List
+
 import pandas as pd
-from typing import List, Any, Dict
-
-# LangChain / OpenAI
-from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.docstore.document import Document
-from langchain.agents import Tool, AgentType, initialize_agent
-
 from scipy import stats
 
-# ---------------------------------------------------------
-# 1. LOAD ENV & GLOBALS
-# ---------------------------------------------------------
+from langchain.docstore.document import Document
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.agents import Tool, AgentType, initialize_agent
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.llms import GPT4All
 
-load_dotenv()  # loads OPENAI_API_KEY if in .env
+
+# ---------------------------------------------------------
+# 1. BASIC PATHS – CHANGE THESE IF NEEDED
+# ---------------------------------------------------------
 
 DATA_PATH = "data/survey.csv"
-DOCS_PATH = "docs/*.txt"
+DOCS_GLOB = "docs/*.txt"
 
-# Load survey data once, globally (you can change this later)
+# Path to your local GPT4All model (.gguf)
+# Example for Windows:
+# MODEL_PATH = r"C:\Users\YourName\AppData\Local\nomic.ai\GPT4All\deepseek-r1-distill-qwen-7b.Q4_0.gguf"
+MODEL_PATH = "models/deepseek-r1-distill-qwen-7b.Q4_0.gguf"
+
+
+# ---------------------------------------------------------
+# 2. LOAD SURVEY DATA
+# ---------------------------------------------------------
+
 if os.path.exists(DATA_PATH):
     df = pd.read_csv(DATA_PATH)
+    print(f"[INFO] Loaded survey data from {DATA_PATH} with shape {df.shape}")
 else:
-    print(f"[WARNING] {DATA_PATH} not found. Tools using df will fail.")
+    print(f"[WARNING] {DATA_PATH} not found. Data tools will not work until you add a CSV.")
     df = pd.DataFrame()
 
 
 # ---------------------------------------------------------
-# 2. BUILD RAG INDEX (QUESTIONNAIRE + THEORY DOCS)
+# 3. BUILD RAG INDEX FROM DOCS/
 # ---------------------------------------------------------
 
 def load_text_documents(pattern: str) -> List[Document]:
@@ -45,12 +53,12 @@ def load_text_documents(pattern: str) -> List[Document]:
 
 
 def build_vectorstore() -> FAISS:
-    print("[INFO] Building vectorstore from docs/ ...")
-    raw_docs = load_text_documents(DOCS_PATH)
+    print("[INFO] Building vector store from docs/ ...")
+    raw_docs = load_text_documents(DOCS_GLOB)
+
     if not raw_docs:
-        print("[WARNING] No documents found under docs/. RAG will return empty.")
-        # create dummy doc so FAISS doesn't break
-        raw_docs = [Document(page_content="No documents loaded.", metadata={"source": "empty"})]
+        print("[WARNING] No .txt documents found in docs/. Creating a dummy document.")
+        raw_docs = [Document(page_content="No documents provided.", metadata={"source": "empty"})]
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=800,
@@ -59,9 +67,10 @@ def build_vectorstore() -> FAISS:
     )
     split_docs = splitter.split_documents(raw_docs)
 
-    embeddings = OpenAIEmbeddings()  # uses text-embedding-3-large by default (depending on version)
-    vs = FAISS.from_documents(split_docs, embeddings)
-    return vs
+    # Local, free embedding model (downloaded once from HuggingFace)
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vectorstore = FAISS.from_documents(split_docs, embeddings)
+    return vectorstore
 
 
 vectorstore = build_vectorstore()
@@ -69,15 +78,18 @@ retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
 
 # ---------------------------------------------------------
-# 3. TOOL FUNCTIONS (STATS & RAG)
+# 4. TOOL FUNCTIONS (RAG + STATS)
 # ---------------------------------------------------------
 
 def rag_search(query: str) -> str:
     """
-    Simple RAG function: retrieve relevant chunks from docs and return as a text block.
-    The agent will then use this as context when answering.
+    Retrieve relevant chunks from questionnaire/theory docs.
+    The agent uses this for definitions and conceptual context.
     """
     docs = retriever.get_relevant_documents(query)
+    if not docs:
+        return "No relevant documents found."
+
     out_parts = []
     for i, d in enumerate(docs):
         src = d.metadata.get("source", "unknown")
@@ -87,51 +99,62 @@ def rag_search(query: str) -> str:
 
 def describe_variables(columns: str) -> str:
     """
-    Describe one or multiple columns from the survey DataFrame.
-    columns: comma-separated column names, e.g. 'Q1,Q2,Q3'
+    Show descriptive statistics for one or more columns.
+    Input: 'col1,col2,col3'
     """
     if df.empty:
-        return "No survey data loaded. Please ensure data/survey.csv exists."
+        return "No survey data loaded. Please add data/survey.csv."
 
     col_list = [c.strip() for c in columns.split(",") if c.strip()]
     missing = [c for c in col_list if c not in df.columns]
-    if missing:
-        return f"The following columns were not found in the dataset: {missing}\nAvailable columns: {list(df.columns)}"
 
-    desc = df[col_list].describe().to_string()
+    if missing:
+        return (
+            f"The following columns were not found: {missing}\n"
+            f"Available columns: {list(df.columns)}"
+        )
+
+    desc = df[col_list].describe(include="all").to_string()
     head = df[col_list].head(5).to_string()
+
     return textwrap.dedent(f"""
     Descriptive statistics for columns: {col_list}
 
-    [Describe()]
+    [describe()]
     {desc}
 
-    [Head(5)]
+    [head(5)]
     {head}
     """)
 
 
 def run_ttest(params: str) -> str:
     """
-    Run an independent samples t-test on a numeric variable between two groups.
-    params format (string): "value_col, group_col, group1, group2"
-    Example: "acceptance_score, region, urban, rural"
+    Independent samples t-test between two groups.
+
+    Input format:
+      "value_col, group_col, group1, group2"
+
+    Example:
+      "acceptance_score, region, urban, rural"
     """
     if df.empty:
-        return "No survey data loaded. Please ensure data/survey.csv exists."
+        return "No survey data loaded. Please add data/survey.csv."
 
     try:
         value_col, group_col, group1, group2 = [p.strip() for p in params.split(",")]
     except ValueError:
         return (
-            "Invalid params format. Use: 'value_col, group_col, group1, group2'\n"
+            "Invalid input. Use: 'value_col, group_col, group1, group2'\n"
             "Example: 'acceptance_score, region, urban, rural'"
         )
 
     if value_col not in df.columns or group_col not in df.columns:
-        return f"Columns not found. value_col: {value_col}, group_col: {group_col}\nAvailable: {list(df.columns)}"
+        return (
+            f"Columns not found. value_col: {value_col}, group_col: {group_col}\n"
+            f"Available columns: {list(df.columns)}"
+        )
 
-    # Drop NA
     subset = df[[value_col, group_col]].dropna()
 
     g1 = subset[subset[group_col] == group1][value_col]
@@ -139,70 +162,80 @@ def run_ttest(params: str) -> str:
 
     if len(g1) < 3 or len(g2) < 3:
         return (
-            f"Not enough data for t-test.\n"
+            "Not enough data for a t-test.\n"
             f"{group1} count: {len(g1)}, {group2} count: {len(g2)}"
         )
 
-    t_stat, p_value = stats.ttest_ind(g1, g2, equal_var=False)  # Welch's t-test
+    t_stat, p_value = stats.ttest_ind(g1, g2, equal_var=False)  # Welch t-test
     mean_g1 = g1.mean()
     mean_g2 = g2.mean()
 
     return textwrap.dedent(f"""
     Independent samples t-test result:
 
-    Value column   : {value_col}
-    Group column   : {group_col}
-    Group 1 (g1)   : {group1} (n={len(g1)}, mean={mean_g1:.3f})
-    Group 2 (g2)   : {group2} (n={len(g2)}, mean={mean_g2:.3f})
+    Value column : {value_col}
+    Group column : {group_col}
 
-    t-statistic    : {t_stat:.4f}
-    p-value        : {p_value:.6f}
+    Group 1: {group1}
+        n    = {len(g1)}
+        mean = {mean_g1:.3f}
 
-    Interpretation:
-    - If p-value < 0.05, there is a statistically significant difference
-      in {value_col} between {group1} and {group2}.
+    Group 2: {group2}
+        n    = {len(g2)}
+        mean = {mean_g2:.3f}
+
+    t-statistic = {t_stat:.4f}
+    p-value     = {p_value:.6f}
+
+    Interpretation guideline:
+    - If p-value < 0.05, there is a statistically significant difference in
+      {value_col} between {group1} and {group2}.
     """)
 
 
 # ---------------------------------------------------------
-# 4. SETUP LLM & AGENT WITH TOOLS
+# 5. LOCAL LLM (GPT4ALL) + AGENT SETUP
 # ---------------------------------------------------------
 
-llm = ChatOpenAI(
-    model="gpt-4o-mini",  # change to any model you have access to
-    temperature=0.2,
+if not os.path.exists(MODEL_PATH):
+    print(f"[WARNING] Model file not found at {MODEL_PATH}. Please update MODEL_PATH.")
+    print("The program will still start, but the LLM will fail when called.")
+
+llm = GPT4All(
+    model=MODEL_PATH,
+    verbose=True,
+    n_threads=8,   # adjust to your CPU
 )
+
 
 tools = [
     Tool(
         name="RAG_Search_Docs",
         func=rag_search,
         description=(
-            "Use this to retrieve relevant context from the questionnaire, codebook, or theory documents. "
-            "Input should be a natural language query about definitions, constructs, or theoretical concepts."
+            "Use this to look up information in the questionnaire, codebook, or theory documents. "
+            "Input is a natural language query about definitions, constructs, or theoretical concepts."
         ),
     ),
     Tool(
         name="Describe_Survey_Variables",
         func=describe_variables,
         description=(
-            "Use this to get descriptive statistics (count, mean, std, min, max, quartiles) "
-            "for one or more survey variables (columns). "
-            "Input should be a comma-separated list of column names, e.g. 'Q1,Q2,Q3' or 'acceptance_score'."
+            "Use this to get descriptive statistics for one or more survey variables. "
+            "Input must be a comma-separated list of column names, e.g. 'Q1,Q2,Q3'."
         ),
     ),
     Tool(
         name="Run_TTest_Between_Groups",
         func=run_ttest,
         description=(
-            "Use this to test differences between two groups using an independent samples t-test. "
-            "Input format: 'value_col, group_col, group1, group2'. "
-            "Example: 'acceptance_score, region, urban, rural'."
+            "Use this to compare the mean of a numeric variable between two groups "
+            "with an independent samples t-test. "
+            "Input format: 'value_col, group_col, group1, group2'."
         ),
     ),
 ]
 
-# Agent with ReAct style
 agent = initialize_agent(
     tools=tools,
     llm=llm,
@@ -211,48 +244,41 @@ agent = initialize_agent(
 )
 
 
-# ---------------------------------------------------------
-# 5. SYSTEM MESSAGE / AGENT ROLE
-# ---------------------------------------------------------
-
 SYSTEM_INSTRUCTIONS = """
 You are InsightRAG, an autonomous survey analysis assistant.
 
 Your goals:
-1) Understand the user's research-style questions about a survey dataset.
-2) When needed, use the tools:
-   - RAG_Search_Docs: to consult the questionnaire and theory documents.
-   - Describe_Survey_Variables: to inspect data distributions and variable summaries.
-   - Run_TTest_Between_Groups: to compare means between two groups.
-3) Combine numerical outputs from tools with theoretical context from RAG to produce
-   clear, well-structured explanations.
-4) Write in a professional but accessible academic tone. If the user asks in Korean,
-   respond in Korean (e.g., '-다, -이다, -있다' style if appropriate). If they ask
-   in English, respond in English.
+1) Understand the user's questions about a survey dataset and related theory.
+2) Use tools when needed:
+   - RAG_Search_Docs: to consult questionnaire, codebook, and theory notes.
+   - Describe_Survey_Variables: to check distributions and descriptive stats.
+   - Run_TTest_Between_Groups: to test differences between two groups.
+3) Combine tool outputs with clear reasoning to produce well-structured answers.
 
 Always:
-- Explicitly mention what statistical tests you used.
-- Report key numbers (means, n, p-values) when available.
-- Provide both a brief summary and a more detailed interpretation.
+- Explain which statistical methods you used.
+- Report key numbers (sample sizes, means, p-values) when available.
+- Answer in clear, professional English.
 """
 
-# We'll pass this as part of the first message each time.
-# For simplicity, we prepend it to the user query.
 
+# ---------------------------------------------------------
+# 6. SIMPLE COMMAND-LINE CHAT LOOP
+# ---------------------------------------------------------
 
 def chat_with_agent():
-    print("=== InsightRAG: Autonomous Survey Analyst ===")
+    print("=== InsightRAG: Autonomous Survey Analyst (Local LLM) ===")
     print("Type 'exit' to quit.\n")
 
     while True:
         user_input = input("You: ")
         if user_input.strip().lower() in ["exit", "quit"]:
-            print("Bye!")
+            print("Goodbye!")
             break
 
-        full_prompt = SYSTEM_INSTRUCTIONS + "\n\nUser query:\n" + user_input
+        prompt = SYSTEM_INSTRUCTIONS + "\n\nUser query:\n" + user_input
         try:
-            response = agent.run(full_prompt)
+            response = agent.run(prompt)
         except Exception as e:
             response = f"[ERROR] {e}"
 
