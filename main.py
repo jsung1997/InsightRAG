@@ -53,17 +53,22 @@ def build_vectorstore():
 
     raw_docs = load_docs()
     if not raw_docs:
-        raw_docs = [Document(page_content="No documents available.", metadata={"source": "empty"})]
+        print("[WARNING] No documents found in docs/. Creating dummy document.")
+        raw_docs = [Document(page_content="Placeholder text.", metadata={"source": "dummy.txt"})]
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=200)
     chunks = splitter.split_documents(raw_docs)
 
-    # Local embeddings model (offline)
+    if not chunks:
+        print("[WARNING] Document splitter returned 0 chunks. Creating dummy chunk.")
+        chunks = [Document(page_content="Placeholder text chunk.", metadata={"source": "dummy.txt"})]
+
     embedder = SentenceTransformer("all-MiniLM-L6-v2")
     texts = [c.page_content for c in chunks]
     embeddings = embedder.encode(texts)
 
     return FAISS.from_embeddings(embeddings, chunks)
+
 
 
 vectorstore = build_vectorstore()
