@@ -1,5 +1,4 @@
 # InsightRAG
-InsightRAG is an autonomous survey analysis agent that combines RAG with statistical tool-use to interpret datasets, generate insights, and produce theory-grounded explanations. It retrieves context from questionnaires and academic literature, runs analyses, and delivers clear, accurate, and actionable results.
 
 InsightRAG is an autonomous survey-analysis system that integrates Retrieval-Augmented Generation (RAG) with agentic reasoning to perform end-to-end analytical tasks. Instead of simply answering questions, InsightRAG reads and understands survey questionnaires, codebooks, and theoretical documents by indexing them into a vector database. When users ask analytical questions, the system retrieves the most relevant contextual information—such as variable definitions, measurement scales, or theoretical frameworks—and uses it to guide both the statistical approach and the interpretive logic behind its conclusions.
 
